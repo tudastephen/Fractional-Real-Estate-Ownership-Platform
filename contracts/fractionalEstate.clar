@@ -214,3 +214,91 @@
     (ok (not (get active property)))
   )
 )
+
+
+
+(define-public (transfer-property-ownership (property-id uint) (new-owner principal))
+  (let (
+    (property (unwrap! (get-property property-id) err-property-not-found))
+  )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (not (is-eq new-owner contract-owner)) err-unauthorized)
+    
+    (map-set properties
+      { property-id: property-id }
+      (merge property { owner: new-owner })
+    )
+    
+    (ok new-owner)
+  )
+)
+
+
+(define-map share-trades 
+  { trade-id: uint }
+  {
+    seller: principal,
+    property-id: uint,
+    shares: uint,
+    price-per-share: uint,
+    active: bool
+  }
+)
+
+(define-data-var next-trade-id uint u1)
+
+(define-public (create-share-trade (property-id uint) (shares uint) (price-per-share uint))
+  (let (
+    (trade-id (var-get next-trade-id))
+    (user-shares (get-user-shares property-id tx-sender))
+  )
+    (asserts! (>= (get shares user-shares) shares) err-insufficient-shares)
+    (asserts! (> shares u0) err-invalid-amount)
+    (asserts! (> price-per-share u0) err-invalid-amount)
+    
+    (map-set share-trades
+      { trade-id: trade-id }
+      {
+        seller: tx-sender,
+        property-id: property-id,
+        shares: shares,
+        price-per-share: price-per-share,
+        active: true
+      }
+    )
+    
+    (var-set next-trade-id (+ trade-id u1))
+    (ok trade-id)
+  )
+)
+
+(define-public (execute-share-trade (trade-id uint))
+  (let (
+    (trade (unwrap! (map-get? share-trades { trade-id: trade-id }) err-not-found))
+    (total-cost (* (get shares trade) (get price-per-share trade)))
+    (seller-shares (get-user-shares (get property-id trade) (get seller trade)))
+    (buyer-shares (get-user-shares (get property-id trade) tx-sender))
+  )
+    (asserts! (get active trade) err-property-not-active)
+    (asserts! (not (is-eq tx-sender (get seller trade))) err-unauthorized)
+    
+    (try! (stx-transfer? total-cost tx-sender (get seller trade)))
+    
+    (map-set property-shares
+      { property-id: (get property-id trade), owner: (get seller trade) }
+      { shares: (- (get shares seller-shares) (get shares trade)) }
+    )
+    
+    (map-set property-shares
+      { property-id: (get property-id trade), owner: tx-sender }
+      { shares: (+ (get shares buyer-shares) (get shares trade)) }
+    )
+    
+    (map-set share-trades
+      { trade-id: trade-id }
+      (merge trade { active: false })
+    )
+    
+    (ok trade-id)
+  )
+)
