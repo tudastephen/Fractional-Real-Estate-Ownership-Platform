@@ -13,6 +13,9 @@
 (define-constant err-shares-not-available (err u108))
 (define-constant err-invalid-amount (err u109))
 
+(define-constant err-rental-not-found (err u110))
+(define-constant err-no-rental-income (err u111))
+
 (define-data-var next-property-id uint u1)
 
 (define-map properties
@@ -300,5 +303,106 @@
     )
     
     (ok trade-id)
+  )
+)
+
+
+(define-map property-rental-income
+  { property-id: uint }
+  { 
+    total-rental-collected: uint,
+    rental-income-per-share: uint,
+    last-rental-date: uint
+  }
+)
+
+(define-map user-rental-claims
+  { property-id: uint, user: principal }
+  { claimed-rental-per-share: uint }
+)
+
+(define-read-only (get-property-rental-income (property-id uint))
+  (default-to 
+    { total-rental-collected: u0, rental-income-per-share: u0, last-rental-date: u0 }
+    (map-get? property-rental-income { property-id: property-id })
+  )
+)
+
+(define-read-only (get-claimable-rental-income (property-id uint) (user principal))
+  (let (
+    (user-shares (get-user-shares property-id user))
+    (rental-info (get-property-rental-income property-id))
+    (user-claims (default-to 
+      { claimed-rental-per-share: u0 }
+      (map-get? user-rental-claims { property-id: property-id, user: user })
+    ))
+  )
+    (if (> (get shares user-shares) u0)
+      (let (
+        (unclaimed-rental-per-share (- (get rental-income-per-share rental-info) (get claimed-rental-per-share user-claims)))
+        (total-claimable (* unclaimed-rental-per-share (get shares user-shares)))
+      )
+        (ok total-claimable)
+      )
+      (ok u0)
+    )
+  )
+)
+
+(define-public (record-rental-income (property-id uint) (rental-amount uint))
+  (let (
+    (property (unwrap! (get-property property-id) err-property-not-found))
+    (current-rental (get-property-rental-income property-id))
+    (total-shares (get total-shares property))
+    (rental-per-share (/ rental-amount total-shares))
+  )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> rental-amount u0) err-invalid-amount)
+    (asserts! (> total-shares u0) err-invalid-amount)
+    
+    (try! (stx-transfer? rental-amount tx-sender (as-contract tx-sender)))
+    
+    (map-set property-rental-income
+      { property-id: property-id }
+      {
+        total-rental-collected: (+ (get total-rental-collected current-rental) rental-amount),
+        rental-income-per-share: (+ (get rental-income-per-share current-rental) rental-per-share),
+        last-rental-date: stacks-block-height
+      }
+    )
+    
+    (ok rental-per-share)
+  )
+)
+
+(define-public (claim-rental-income (property-id uint))
+  (let (
+    (property (unwrap! (get-property property-id) err-property-not-found))
+    (claimable-amount (unwrap! (get-claimable-rental-income property-id tx-sender) err-rental-not-found))
+    (rental-info (get-property-rental-income property-id))
+  )
+    (asserts! (> claimable-amount u0) err-no-rental-income)
+    
+    (try! (as-contract (stx-transfer? claimable-amount tx-sender tx-sender)))
+    
+    (map-set user-rental-claims
+      { property-id: property-id, user: tx-sender }
+      { claimed-rental-per-share: (get rental-income-per-share rental-info) }
+    )
+    
+    (ok claimable-amount)
+  )
+)
+
+(define-read-only (get-property-rental-yield (property-id uint))
+  (let (
+    (property (unwrap! (get-property property-id) err-property-not-found))
+    (rental-info (get-property-rental-income property-id))
+    (property-value (* (get total-shares property) (get price-per-share property)))
+  )
+    (if (> property-value u0)
+      (ok (/ (* (get total-rental-collected rental-info) u10000) property-value))
+      (ok u0)
+    )
   )
 )
