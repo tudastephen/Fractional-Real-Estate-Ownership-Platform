@@ -18,6 +18,42 @@
 
 (define-data-var next-property-id uint u1)
 
+
+(define-constant err-proposal-not-found (err u112))
+(define-constant err-proposal-expired (err u113))
+(define-constant err-proposal-not-active (err u114))
+(define-constant err-already-voted (err u115))
+(define-constant err-proposal-not-passed (err u116))
+(define-constant err-proposal-already-executed (err u117))
+(define-constant err-invalid-voting-period (err u118))
+(define-constant err-invalid-threshold (err u119))
+(define-constant err-no-shares (err u120))
+
+(define-data-var next-proposal-id uint u1)
+
+(define-map property-proposals
+  { proposal-id: uint }
+  {
+    property-id: uint,
+    proposer: principal,
+    proposal-type: (string-ascii 50),
+    description: (string-ascii 500),
+    amount: uint,
+    voting-deadline: uint,
+    total-votes-for: uint,
+    total-votes-against: uint,
+    executed: bool,
+    active: bool,
+    execution-threshold: uint
+  }
+)
+
+(define-map proposal-votes
+  { proposal-id: uint, voter: principal }
+  { vote: bool, voting-power: uint }
+)
+
+
 (define-map properties
   { property-id: uint }
   {
@@ -404,5 +440,179 @@
       (ok (/ (* (get total-rental-collected rental-info) u10000) property-value))
       (ok u0)
     )
+  )
+)
+
+(define-read-only (get-proposal (proposal-id uint))
+  (map-get? property-proposals { proposal-id: proposal-id })
+)
+
+(define-read-only (get-user-vote (proposal-id uint) (voter principal))
+  (map-get? proposal-votes { proposal-id: proposal-id, voter: voter })
+)
+
+(define-read-only (get-proposal-status (proposal-id uint))
+  (let (
+    (proposal (unwrap! (get-proposal proposal-id) err-proposal-not-found))
+    (property (unwrap! (get-property (get property-id proposal)) err-property-not-found))
+    (total-shares (get total-shares property))
+    (votes-for (get total-votes-for proposal))
+    (votes-against (get total-votes-against proposal))
+    (total-votes (+ votes-for votes-against))
+    (approval-rate (if (> total-votes u0) (/ (* votes-for u10000) total-votes) u0))
+    (participation-rate (if (> total-shares u0) (/ (* total-votes u10000) total-shares) u0))
+    (required-threshold (get execution-threshold proposal))
+  )
+    (ok {
+      proposal-id: proposal-id,
+      total-votes: total-votes,
+      votes-for: votes-for,
+      votes-against: votes-against,
+      approval-rate: approval-rate,
+      participation-rate: participation-rate,
+      required-threshold: required-threshold,
+      passed: (>= approval-rate required-threshold),
+      expired: (> stacks-block-height (get voting-deadline proposal))
+    })
+  )
+)
+
+(define-public (create-proposal (property-id uint) (proposal-type (string-ascii 50)) (description (string-ascii 500)) (amount uint) (voting-period uint) (threshold uint))
+  (let (
+    (proposal-id (var-get next-proposal-id))
+    (property (unwrap! (get-property property-id) err-property-not-found))
+    (user-shares (get-user-shares property-id tx-sender))
+    (voting-deadline (+ stacks-block-height voting-period))
+  )
+    (asserts! (> (get shares user-shares) u0) err-no-shares)
+    (asserts! (> voting-period u0) err-invalid-voting-period)
+    (asserts! (and (>= threshold u5000) (<= threshold u10000)) err-invalid-threshold)
+    (asserts! (get active property) err-property-not-active)
+    
+    (map-set property-proposals
+      { proposal-id: proposal-id }
+      {
+        property-id: property-id,
+        proposer: tx-sender,
+        proposal-type: proposal-type,
+        description: description,
+        amount: amount,
+        voting-deadline: voting-deadline,
+        total-votes-for: u0,
+        total-votes-against: u0,
+        executed: false,
+        active: true,
+        execution-threshold: threshold
+      }
+    )
+    
+    (var-set next-proposal-id (+ proposal-id u1))
+    (ok proposal-id)
+  )
+)
+
+(define-public (vote-on-proposal (proposal-id uint) (vote-for bool))
+  (let (
+    (proposal (unwrap! (get-proposal proposal-id) err-proposal-not-found))
+    (property (unwrap! (get-property (get property-id proposal)) err-property-not-found))
+    (user-shares (get-user-shares (get property-id proposal) tx-sender))
+    (voting-power (get shares user-shares))
+    (existing-vote (get-user-vote proposal-id tx-sender))
+  )
+    (asserts! (get active proposal) err-proposal-not-active)
+    (asserts! (<= stacks-block-height (get voting-deadline proposal)) err-proposal-expired)
+    (asserts! (> voting-power u0) err-no-shares)
+    (asserts! (is-none existing-vote) err-already-voted)
+    
+    (map-set proposal-votes
+      { proposal-id: proposal-id, voter: tx-sender }
+      { vote: vote-for, voting-power: voting-power }
+    )
+    
+    (if vote-for
+      (map-set property-proposals
+        { proposal-id: proposal-id }
+        (merge proposal { total-votes-for: (+ (get total-votes-for proposal) voting-power) })
+      )
+      (map-set property-proposals
+        { proposal-id: proposal-id }
+        (merge proposal { total-votes-against: (+ (get total-votes-against proposal) voting-power) })
+      )
+    )
+    
+    (ok voting-power)
+  )
+)
+
+(define-public (execute-proposal (proposal-id uint))
+  (let (
+    (proposal (unwrap! (get-proposal proposal-id) err-proposal-not-found))
+    (property (unwrap! (get-property (get property-id proposal)) err-property-not-found))
+    (total-shares (get total-shares property))
+    (votes-for (get total-votes-for proposal))
+    (votes-against (get total-votes-against proposal))
+    (total-votes (+ votes-for votes-against))
+    (approval-rate (if (> total-votes u0) (/ (* votes-for u10000) total-votes) u0))
+    (proposal-type (get proposal-type proposal))
+    (proposal-amount (get amount proposal))
+  )
+    (asserts! (get active proposal) err-proposal-not-active)
+    (asserts! (> stacks-block-height (get voting-deadline proposal)) err-proposal-expired)
+    (asserts! (not (get executed proposal)) err-proposal-already-executed)
+    (asserts! (>= approval-rate (get execution-threshold proposal)) err-proposal-not-passed)
+    
+    (map-set property-proposals
+      { proposal-id: proposal-id }
+      (merge proposal { executed: true, active: false })
+    )
+    
+    (if (is-eq proposal-type "maintenance")
+      (begin
+        (try! (as-contract (stx-transfer? proposal-amount tx-sender (get proposer proposal))))
+        (ok "maintenance-approved")
+      )
+      (if (is-eq proposal-type "renovation")
+        (begin
+          (try! (as-contract (stx-transfer? proposal-amount tx-sender (get proposer proposal))))
+          (ok "renovation-approved")
+        )
+        (if (is-eq proposal-type "management-change")
+          (begin
+            (map-set properties
+              { property-id: (get property-id proposal) }
+              (merge property { owner: (get proposer proposal) })
+            )
+            (ok "management-changed")
+          )
+          (if (is-eq proposal-type "property-sale")
+            (begin
+              (map-set properties
+                { property-id: (get property-id proposal) }
+                (merge property { active: false })
+              )
+              (ok "property-sale-approved")
+            )
+            (ok "proposal-executed")
+          )
+        )
+      )
+    )
+  )
+)
+
+(define-public (cancel-proposal (proposal-id uint))
+  (let (
+    (proposal (unwrap! (get-proposal proposal-id) err-proposal-not-found))
+  )
+    (asserts! (is-eq tx-sender (get proposer proposal)) err-unauthorized)
+    (asserts! (get active proposal) err-proposal-not-active)
+    (asserts! (not (get executed proposal)) err-proposal-already-executed)
+    
+    (map-set property-proposals
+      { proposal-id: proposal-id }
+      (merge proposal { active: false })
+    )
+    
+    (ok proposal-id)
   )
 )
