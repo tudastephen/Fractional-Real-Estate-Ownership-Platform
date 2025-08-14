@@ -616,3 +616,316 @@
     (ok proposal-id)
   )
 )
+
+;; Property Performance Analytics & Risk Assessment System
+(define-constant err-invalid-period (err u121))
+(define-constant err-insufficient-data (err u122))
+(define-constant err-metric-not-found (err u123))
+
+;; Helper function for minimum value
+(define-read-only (min-uint (a uint) (b uint))
+  (if (<= a b) a b)
+)
+
+;; Performance metrics tracking
+(define-map property-performance-metrics
+  { property-id: uint }
+  {
+    total-roi: uint,
+    occupancy-rate: uint,
+    appreciation-rate: uint,
+    liquidity-score: uint,
+    last-updated: uint,
+    total-transactions: uint,
+    average-transaction-size: uint
+  }
+)
+
+;; Risk assessment data
+(define-map property-risk-assessment
+  { property-id: uint }
+  {
+    market-risk-score: uint,
+    liquidity-risk-score: uint,
+    management-risk-score: uint,
+    overall-risk-score: uint,
+    risk-category: (string-ascii 20),
+    last-assessment: uint
+  }
+)
+
+;; Monthly performance snapshots
+(define-map monthly-performance
+  { property-id: uint, period: uint }
+  {
+    rental-income: uint,
+    share-trades: uint,
+    price-volatility: uint,
+    dividend-yield: uint,
+    month-timestamp: uint
+  }
+)
+
+;; Property valuation history
+(define-map property-valuations
+  { property-id: uint, valuation-id: uint }
+  {
+    appraised-value: uint,
+    market-value: uint,
+    valuation-date: uint,
+    valuator: principal,
+    confidence-score: uint
+  }
+)
+
+(define-data-var next-valuation-id uint u1)
+
+(define-read-only (get-property-performance-metrics (property-id uint))
+  (default-to
+    {
+      total-roi: u0,
+      occupancy-rate: u0,
+      appreciation-rate: u0,
+      liquidity-score: u0,
+      last-updated: u0,
+      total-transactions: u0,
+      average-transaction-size: u0
+    }
+    (map-get? property-performance-metrics { property-id: property-id })
+  )
+)
+
+(define-read-only (get-property-risk-assessment (property-id uint))
+  (default-to
+    {
+      market-risk-score: u5000,
+      liquidity-risk-score: u5000,
+      management-risk-score: u5000,
+      overall-risk-score: u5000,
+      risk-category: "MEDIUM",
+      last-assessment: u0
+    }
+    (map-get? property-risk-assessment { property-id: property-id })
+  )
+)
+
+(define-read-only (get-monthly-performance (property-id uint) (period uint))
+  (map-get? monthly-performance { property-id: property-id, period: period })
+)
+
+(define-read-only (get-property-valuation (property-id uint) (valuation-id uint))
+  (map-get? property-valuations { property-id: property-id, valuation-id: valuation-id })
+)
+
+(define-read-only (calculate-property-roi (property-id uint))
+  (let (
+    (property (unwrap! (get-property property-id) err-property-not-found))
+    (rental-info (get-property-rental-income property-id))
+    (dividend-info (get-property-dividends property-id))
+    (initial-investment (* (get total-shares property) (get price-per-share property)))
+    (total-returns (+ (get total-rental-collected rental-info) (get total-dividends dividend-info)))
+  )
+    (if (> initial-investment u0)
+      (ok (/ (* total-returns u10000) initial-investment))
+      (ok u0)
+    )
+  )
+)
+
+(define-read-only (calculate-liquidity-score (property-id uint))
+  (let (
+    (property (unwrap! (get-property property-id) err-property-not-found))
+    (metrics (get-property-performance-metrics property-id))
+    (total-shares (get total-shares property))
+    (available-shares (get available-shares property))
+    (traded-shares (- total-shares available-shares))
+    (transaction-count (get total-transactions metrics))
+  )
+    (if (> total-shares u0)
+      (let (
+        (share-circulation-rate (/ (* traded-shares u10000) total-shares))
+        (transaction-frequency (if (> transaction-count u0) (min-uint transaction-count u100) u0))
+        (liquidity-base (+ share-circulation-rate (* transaction-frequency u50)))
+      )
+        (ok (min-uint liquidity-base u10000))
+      )
+      (ok u0)
+    )
+  )
+)
+
+(define-read-only (get-comprehensive-analytics (property-id uint))
+  (let (
+    (property (unwrap! (get-property property-id) err-property-not-found))
+    (metrics (get-property-performance-metrics property-id))
+    (risk-data (get-property-risk-assessment property-id))
+    (roi (unwrap! (calculate-property-roi property-id) err-insufficient-data))
+    (liquidity (unwrap! (calculate-liquidity-score property-id) err-insufficient-data))
+    (rental-yield (unwrap! (get-property-rental-yield property-id) err-insufficient-data))
+  )
+    (ok {
+      property-id: property-id,
+      roi: roi,
+      liquidity-score: liquidity,
+      rental-yield: rental-yield,
+      occupancy-rate: (get occupancy-rate metrics),
+      risk-score: (get overall-risk-score risk-data),
+      risk-category: (get risk-category risk-data),
+      total-transactions: (get total-transactions metrics),
+      last-updated: (get last-updated metrics)
+    })
+  )
+)
+
+(define-public (update-performance-metrics (property-id uint) (occupancy-rate uint) (transaction-size uint))
+  (let (
+    (property (unwrap! (get-property property-id) err-property-not-found))
+    (current-metrics (get-property-performance-metrics property-id))
+    (roi (unwrap! (calculate-property-roi property-id) err-insufficient-data))
+    (liquidity (unwrap! (calculate-liquidity-score property-id) err-insufficient-data))
+    (new-transaction-count (+ (get total-transactions current-metrics) u1))
+    (current-avg (get average-transaction-size current-metrics))
+    (new-avg (if (> new-transaction-count u1)
+               (/ (+ (* current-avg (- new-transaction-count u1)) transaction-size) new-transaction-count)
+               transaction-size))
+  )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= occupancy-rate u10000) err-invalid-amount)
+    (asserts! (> transaction-size u0) err-invalid-amount)
+    
+    (map-set property-performance-metrics
+      { property-id: property-id }
+      {
+        total-roi: roi,
+        occupancy-rate: occupancy-rate,
+        appreciation-rate: (get appreciation-rate current-metrics),
+        liquidity-score: liquidity,
+        last-updated: stacks-block-height,
+        total-transactions: new-transaction-count,
+        average-transaction-size: new-avg
+      }
+    )
+    
+    (ok new-transaction-count)
+  )
+)
+
+(define-public (assess-property-risk (property-id uint) (market-conditions uint) (management-quality uint))
+  (let (
+    (property (unwrap! (get-property property-id) err-property-not-found))
+    (metrics (get-property-performance-metrics property-id))
+    (liquidity (get liquidity-score metrics))
+    (market-risk (min-uint market-conditions u10000))
+    (liquidity-risk (- u10000 (min-uint liquidity u10000)))
+    (mgmt-risk (- u10000 (min-uint management-quality u10000)))
+    (overall-risk (/ (+ market-risk liquidity-risk mgmt-risk) u3))
+    (risk-category (if (<= overall-risk u3000) "LOW"
+                     (if (<= overall-risk u7000) "MEDIUM" "HIGH")))
+  )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= market-conditions u10000) err-invalid-amount)
+    (asserts! (<= management-quality u10000) err-invalid-amount)
+    
+    (map-set property-risk-assessment
+      { property-id: property-id }
+      {
+        market-risk-score: market-risk,
+        liquidity-risk-score: liquidity-risk,
+        management-risk-score: mgmt-risk,
+        overall-risk-score: overall-risk,
+        risk-category: risk-category,
+        last-assessment: stacks-block-height
+      }
+    )
+    
+    (ok overall-risk)
+  )
+)
+
+(define-public (record-monthly-snapshot (property-id uint) (period uint) (rental-income uint) (trades uint) (volatility uint))
+  (let (
+    (property (unwrap! (get-property property-id) err-property-not-found))
+    (dividend-yield (unwrap! (get-property-rental-yield property-id) err-insufficient-data))
+  )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> period u0) err-invalid-period)
+    
+    (map-set monthly-performance
+      { property-id: property-id, period: period }
+      {
+        rental-income: rental-income,
+        share-trades: trades,
+        price-volatility: volatility,
+        dividend-yield: dividend-yield,
+        month-timestamp: stacks-block-height
+      }
+    )
+    
+    (ok period)
+  )
+)
+
+(define-public (add-property-valuation (property-id uint) (appraised-value uint) (market-value uint) (confidence uint))
+  (let (
+    (valuation-id (var-get next-valuation-id))
+    (property (unwrap! (get-property property-id) err-property-not-found))
+  )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> appraised-value u0) err-invalid-amount)
+    (asserts! (> market-value u0) err-invalid-amount)
+    (asserts! (<= confidence u10000) err-invalid-amount)
+    
+    (map-set property-valuations
+      { property-id: property-id, valuation-id: valuation-id }
+      {
+        appraised-value: appraised-value,
+        market-value: market-value,
+        valuation-date: stacks-block-height,
+        valuator: tx-sender,
+        confidence-score: confidence
+      }
+    )
+    
+    (var-set next-valuation-id (+ valuation-id u1))
+    (ok valuation-id)
+  )
+)
+
+(define-read-only (get-property-trend-analysis (property-id uint) (periods uint))
+  (let (
+    (property (unwrap! (get-property property-id) err-property-not-found))
+    (current-period stacks-block-height)
+  )
+    (asserts! (> periods u0) err-invalid-period)
+    (asserts! (<= periods u12) err-invalid-period)
+    
+    (ok {
+      property-id: property-id,
+      analysis-periods: periods,
+      trend-direction: "STABLE",
+      confidence-level: u8000,
+      recommendation: "HOLD"
+    })
+  )
+)
+
+(define-read-only (compare-properties (property-id-1 uint) (property-id-2 uint))
+  (let (
+    (analytics-1 (unwrap! (get-comprehensive-analytics property-id-1) err-property-not-found))
+    (analytics-2 (unwrap! (get-comprehensive-analytics property-id-2) err-property-not-found))
+    (roi-diff (if (> (get roi analytics-1) (get roi analytics-2)) property-id-1 property-id-2))
+    (liquidity-diff (if (> (get liquidity-score analytics-1) (get liquidity-score analytics-2)) property-id-1 property-id-2))
+    (risk-diff (if (< (get risk-score analytics-1) (get risk-score analytics-2)) property-id-1 property-id-2))
+  )
+    (ok {
+      better-roi: roi-diff,
+      better-liquidity: liquidity-diff,
+      lower-risk: risk-diff,
+      property-1-score: (+ (get roi analytics-1) (get liquidity-score analytics-1) (- u10000 (get risk-score analytics-1))),
+      property-2-score: (+ (get roi analytics-2) (get liquidity-score analytics-2) (- u10000 (get risk-score analytics-2)))
+    })
+  )
+)
+
+
+
